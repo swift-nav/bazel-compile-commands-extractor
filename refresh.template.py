@@ -870,6 +870,11 @@ def _all_platform_patch(compile_args: typing.List[str]):
     # For more context see: https://github.com/hedronvision/bazel-compile-commands-extractor/issues/21
     compile_args = (arg for arg in compile_args if not arg == '-fno-canonical-system-headers')
 
+    # Strip out -c flag. It's not needed for language server analysis and causes errors
+    # when combined with preprocessing operations like dependency generation (-M flags).
+    # Error: "argument unused during compilation: '-c' [-Werror,-Wunused-command-line-argument]"
+    compile_args = (arg for arg in compile_args if arg != '-c')
+
     # Strip out -gcc-toolchain to work around https://github.com/clangd/clangd/issues/1248
     skip_next = False
     new_compile_args = []
