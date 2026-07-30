@@ -129,6 +129,17 @@ def _get_bazel_version():
 @functools.lru_cache(maxsize=None)
 def _get_bazel_cached_action_keys():
     """Gets the set of actionKeys cached in bazel-out."""
+    # Bazel 9 dropped actionKey from `bazel dump --action_cache`; an entry now stores only a
+    # digest (a hash combining the action key, client env, and input digests) that aquery doesn't
+    # expose, so there's nothing left for us to match against. See https://github.com/helly25/bazel-compile-commands-extractor/issues/23
+    # We therefore skip the dump entirely on Bazel >= 9, where it would otherwise print the whole
+    # action cache--easily gigabytes on large projects--via the "Failed to get action keys" warning
+    # below, once per worker racing into this lru_cache. Losing this fast path only means we re-run
+    # the preprocessor to find headers rather than reusing Bazel's cached .d files; the resulting
+    # compile commands stay correct.
+    if _get_bazel_version() >= (9, 0, 0):
+        return set()
+
     action_cache_process = subprocess.run(
         ['bazel', 'dump', '--action_cache'],
         # MIN_PY=3.7: Replace PIPEs with capture_output.
@@ -150,7 +161,10 @@ def _get_bazel_cached_action_keys():
     # Make sure we get notified of changes to the format, since bazel dump --action_cache isn't public API.
     # We continue gracefully, rather than asserting, because we can (conservatively) continue without hitting cache.
     if not marked_as_empty and not action_keys:
-        log_warning(">>> Failed to get action keys from Bazel.\nPlease file an issue with the following log:\n", action_cache_process.stdout)
+        # Truncate the dump: on large projects it holds every action's discovered inputs and can
+        # reach gigabytes, which would flood the terminal and exhaust memory if printed whole.
+        truncated_dump = '\n'.join(action_cache_process.stdout.splitlines()[:20])
+        log_warning(">>> Failed to get action keys from Bazel.\nPlease file an issue with the following log (truncated to the first 20 lines):\n", truncated_dump)
 
     return action_keys
 
@@ -240,7 +254,8 @@ def _get_headers_gcc(compile_action, source_path: str, action_key: str):
     # Flags reference here: https://clang.llvm.org/docs/ClangCommandLineReference.html
 
     # Check to see if Bazel has an (approximately) fresh cache of the included headers, and if so, use them to avoid a slow preprocessing step.
-    if action_key in _get_bazel_cached_action_keys():  # Safe because Bazel only holds one cached action key per path, and the key contains the path.
+    # The action-cache membership check is unavailable on Bazel >= 9 (see _get_bazel_cached_action_keys), so trust_bazel_dep_files lets users restore this fast path by trusting the mtime freshness check below alone.
+    if {trust_bazel_dep_files} or action_key in _get_bazel_cached_action_keys():  # Safe because Bazel only holds one cached action key per path, and the key contains the path.
         for i, arg in enumerate(compile_action.arguments):
             if arg.startswith('-MF'):
                 if len(arg) > 3: # Either appended, like -MF<file>
